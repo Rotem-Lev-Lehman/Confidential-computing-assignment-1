@@ -4,7 +4,6 @@
 # Exclude all compiled object files
 *.o
 
-# Exclude the specific executable (based on your previous log)
+# Exclude the specific executable
 crypto_test/crypto_test
-# If you have a main executable in the root, add its name here, e.g.:
-# udp_party
+udp_party

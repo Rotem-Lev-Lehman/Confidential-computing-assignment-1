@@ -434,7 +434,7 @@ ByteSmartPtr Session::prepareEncryptedMessage(unsigned int messageType, const BY
 	// We include the header in the GCM authentication process to ensure the message type,
 	// session ID, and message counter cannot be modified by an attacker.
 	MessageHeader aadHeader;
-	prepareMessageHeader(&aadHeader, messageType, messageSize);
+	prepareMessageHeader(&aadHeader, messageType, ciphertextSize);
 
 	// 3. Encrypt the plaintext using the established session key.
 	// The CryptoWrapper handles the internal generation of a random IV and appends the MAC tag.
