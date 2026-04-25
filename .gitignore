@@ -1,0 +1,10 @@
+# Exclude the VS Code configuration folder
+.vscode/
+
+# Exclude all compiled object files
+*.o
+
+# Exclude the specific executable (based on your previous log)
+crypto_test/crypto_test
+# If you have a main executable in the root, add its name here, e.g.:
+# udp_party
