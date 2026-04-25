@@ -94,7 +94,9 @@ void Session::destroySession()
         if (_privateKeyPassword != NULL)
         {
             // we better clean it using some Utils function
-            // ...
+            size_t pwdLen = strnlen_s(_privateKeyPassword, MAX_PASSWORD_SIZE_BYTES);
+
+            Utils::secureCleanMemory((BYTE*)_privateKeyPassword, pwdLen);
         }
     }
     else
@@ -159,7 +161,11 @@ bool Session::sendMessageInternal(unsigned int type, const BYTE* message, size_t
 
 void Session::cleanDhData()
 {
-    // ...
+    CryptoWrapper::cleanDhContext(&_dhContext);
+
+    Utils::secureCleanMemory(_localDhPublicKeyBuffer, DH_KEY_SIZE_BYTES);
+    Utils::secureCleanMemory(_remoteDhPublicKeyBuffer, DH_KEY_SIZE_BYTES);
+    Utils::secureCleanMemory(_sharedDhSecretBuffer, DH_KEY_SIZE_BYTES);
 }
 
 
@@ -171,7 +177,19 @@ void Session::deriveMacKey(BYTE* macKeyBuffer)
         exit(0);
     }
     
-    // ...
+    if (!CryptoWrapper::deriveKey_HKDF_SHA256(
+        NULL,
+        0,
+        _sharedDhSecretBuffer,
+        DH_KEY_SIZE_BYTES,
+        (const BYTE*)keyDerivationContext,
+        strnlen_s(keyDerivationContext, MAX_CONTEXT_SIZE),
+        macKeyBuffer,
+        HMAC_SIZE_BYTES))
+    {
+        printf("deriveMacKey failed!\n");
+        exit(0);
+    }
 }
 
 
@@ -183,7 +201,19 @@ void Session::deriveSessionKey()
         exit(0);
     }
     
-    // ...
+    if (!CryptoWrapper::deriveKey_HKDF_SHA256(
+        NULL,
+        0,
+        _sharedDhSecretBuffer,
+        DH_KEY_SIZE_BYTES,
+        (const BYTE*)keyDerivationContext,
+        strnlen_s(keyDerivationContext, MAX_CONTEXT_SIZE),
+        _sessionKey,
+        SYMMETRIC_KEY_SIZE_BYTES))
+    {
+        printf("deriveSessionKey failed!\n");
+        exit(0);
+    }
 }
 
 
@@ -225,11 +255,42 @@ ByteSmartPtr Session::prepareSigmaMessage(unsigned int messageType)
         return NULL;
     }
     BYTE signature[SIGNATURE_SIZE_BYTES];
-    // ...
+    if (!CryptoWrapper::signMessageRsa3072Pss(
+        conacatenatedPublicKeysSmartPtr,
+        conacatenatedPublicKeysSmartPtr.size(),
+        privateKeyContext,
+        signature,
+        SIGNATURE_SIZE_BYTES))
+    {
+        printf("prepareDhMessage #%d failed - Error signing public keys\n", messageType);
+        CryptoWrapper::cleanKeyContext(&privateKeyContext);
+        cleanDhData();
+        return NULL;
+    }
+
+    CryptoWrapper::cleanKeyContext(&privateKeyContext);
 
     // Now we will calculate the MAC over my certiicate
     BYTE calculatedMac[HMAC_SIZE_BYTES];
-    // ...
+    BYTE macKey[HMAC_SIZE_BYTES];
+    deriveMacKey(macKey);
+
+    if (!CryptoWrapper::hmac_SHA256(
+        macKey,
+        HMAC_SIZE_BYTES,
+        certBufferSmartPtr,
+        certBufferSmartPtr.size(),
+        calculatedMac,
+        HMAC_SIZE_BYTES))
+    {
+        printf("prepareDhMessage #%d failed - Error calculating certificate MAC\n", messageType);
+        Utils::secureCleanMemory(macKey, HMAC_SIZE_BYTES);
+        Utils::secureCleanMemory(calculatedMac, HMAC_SIZE_BYTES);
+        cleanDhData();
+        return NULL;
+    }
+
+    Utils::secureCleanMemory(macKey, HMAC_SIZE_BYTES);
 
     // pack all of the parts together
     ByteSmartPtr messageToSend = packMessageParts(4, _localDhPublicKeyBuffer, DH_KEY_SIZE_BYTES, (BYTE*)certBufferSmartPtr, certBufferSmartPtr.size(), signature, SIGNATURE_SIZE_BYTES, calculatedMac, HMAC_SIZE_BYTES);
@@ -260,55 +321,167 @@ bool Session::verifySigmaMessage(unsigned int messageType, const BYTE* pPayload,
         return false;
     }
 
-    // ...
+    memcpy(_remoteDhPublicKeyBuffer, parts[0].part, DH_KEY_SIZE_BYTES);
 
     // we will now verify if the received certificate belongs to the expected remote entity
-    // ...
+    if (!CryptoWrapper::checkCertificate(
+        Utils::readBufferFromFile(_rootCaCertFilename),
+        Utils::readBufferFromFile(_rootCaCertFilename).size(),
+        parts[1].part,
+        parts[1].partSize,
+        _expectedRemoteIdentityString))
+    {
+        printf("verifySigmaMessage #%d failed - certificate invalid\n", messageType);
+        return false;
+    }
+
+    KeypairContext* publicKeyContext = NULL;
+
+    if (!CryptoWrapper::getPublicKeyFromCertificate(
+        parts[1].part,
+        parts[1].partSize,
+        &publicKeyContext))
+    {
+        printf("verifySigmaMessage #%d failed - extracting public key\n", messageType);
+        return false;
+    }
 
     // now we will verify if the signature over the concatenated public keys is ok
-    // ...
+    ByteSmartPtr concatenated = concat(
+        2,
+        _remoteDhPublicKeyBuffer, DH_KEY_SIZE_BYTES,
+        _localDhPublicKeyBuffer, DH_KEY_SIZE_BYTES
+    );
+
+    bool sigValid = false;
+
+    if (!CryptoWrapper::verifyMessageRsa3072Pss(
+        concatenated,
+        concatenated.size(),
+        publicKeyContext,
+        parts[2].part,
+        parts[2].partSize,
+        &sigValid) || !sigValid)
+    {
+        printf("verifySigmaMessage #%d failed - bad signature\n", messageType);
+        CryptoWrapper::cleanKeyContext(&publicKeyContext);
+        return false;
+    }
+
+    CryptoWrapper::cleanKeyContext(&publicKeyContext);
 
     if (messageType == 2)
     {
         // Now we will calculate the shared secret
-        // ...
-
+        if (!CryptoWrapper::getDhSharedSecret(
+            _dhContext,
+            _remoteDhPublicKeyBuffer,
+            DH_KEY_SIZE_BYTES,
+            _sharedDhSecretBuffer,
+            DH_KEY_SIZE_BYTES))
+        {
+            printf("verifySigmaMessage #%d failed - DH secret\n", messageType);
+            return false;
+        }
     }
 
     // Now we will verify the MAC over the certificate
-    // ...
+    BYTE macKey[HMAC_SIZE_BYTES];
+    deriveMacKey(macKey);
+
+    BYTE expectedMac[HMAC_SIZE_BYTES];
+
+    if (!CryptoWrapper::hmac_SHA256(
+        macKey,
+        HMAC_SIZE_BYTES,
+        parts[1].part,
+        parts[1].partSize,
+        expectedMac,
+        HMAC_SIZE_BYTES))
+    {
+        return false;
+    }
+
+    if (memcmp(expectedMac, parts[3].part, HMAC_SIZE_BYTES) != 0)
+    {
+        printf("verifySigmaMessage #%d failed - MAC mismatch\n", messageType);
+        return false;
+    }
     
-    return false;
+    return true;
 }
 
 
 ByteSmartPtr Session::prepareEncryptedMessage(unsigned int messageType, const BYTE* message, size_t messageSize)
 {
-    // we will do a plain copy for now
-    size_t encryptedMessageSize = messageSize;
+    size_t encryptedMessageSize = CryptoWrapper::getCiphertextSizeAES_GCM256(messageSize);
+
     BYTE* ciphertext = (BYTE*)Utils::allocateBuffer(encryptedMessageSize);
     if (ciphertext == NULL)
     {
         return NULL;
     }
 
-    memcpy_s(ciphertext, encryptedMessageSize, message, messageSize);
+    size_t actualCiphertextSize = 0;
 
-    ByteSmartPtr result(ciphertext, encryptedMessageSize);
+    if (!CryptoWrapper::encryptAES_GCM256(
+        _sessionKey,
+        SYMMETRIC_KEY_SIZE_BYTES,
+        message,
+        messageSize,
+        (const BYTE*)&messageType,
+        sizeof(messageType),
+        ciphertext,
+        encryptedMessageSize,
+        &actualCiphertextSize))
+    {
+        Utils::secureCleanMemory(ciphertext, encryptedMessageSize);
+        Utils::freeBuffer(ciphertext);
+        return NULL;
+    }
+
+    ByteSmartPtr result(ciphertext, actualCiphertextSize);
     return result;
 }
 
 
 bool Session::decryptMessage(MessageHeader* header, BYTE* buffer, size_t* pPlaintextSize)
 {
-    // we will do a plain copy for now
     size_t ciphertextSize = header->payloadSize;
-    size_t plaintextSize = ciphertextSize;
-    
+    size_t plaintextSize = CryptoWrapper::getPlaintextSizeAES_GCM256(ciphertextSize);
+
+    BYTE* plaintext = (BYTE*)Utils::allocateBuffer(plaintextSize);
+    if (plaintext == NULL)
+    {
+        return false;
+    }
+
+    size_t actualPlaintextSize = 0;
+
+    if (!CryptoWrapper::decryptAES_GCM256(
+        _sessionKey,
+        SYMMETRIC_KEY_SIZE_BYTES,
+        buffer,
+        ciphertextSize,
+        (const BYTE*)&(header->messageType),
+        sizeof(header->messageType),
+        plaintext,
+        plaintextSize,
+        &actualPlaintextSize))
+    {
+        Utils::secureCleanMemory(plaintext, plaintextSize);
+        Utils::freeBuffer(plaintext);
+        return false;
+    }
+
+    memcpy_s(buffer, ciphertextSize, plaintext, actualPlaintextSize);
+
+    Utils::secureCleanMemory(plaintext, plaintextSize);
+    Utils::freeBuffer(plaintext);
 
     if (pPlaintextSize != NULL)
     {
-        *pPlaintextSize = plaintextSize;
+        *pPlaintextSize = actualPlaintextSize;
     }
 
     return true;

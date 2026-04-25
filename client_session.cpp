@@ -13,9 +13,14 @@ ClientSession::ClientSession(unsigned int remotePort, const char* remoteIpAddres
 
     setRemoteAddress(remoteIpAddress, remotePort);
 
-    // Perhaps we can use the first message as Sigma message #1?
-    BYTE dummy[DH_KEY_SIZE_BYTES];
-    if (!sendMessageInternal(HELLO_SESSION_MESSAGE, dummy, DH_KEY_SIZE_BYTES))
+    // SIGMA message #1: send my DH public key
+    if (!CryptoWrapper::startDh(&_dhContext, _localDhPublicKeyBuffer, DH_KEY_SIZE_BYTES))
+    {
+        _state = UNINITIALIZED_SESSION_STATE;
+        cleanDhData();
+        return;
+    }
+    if (!sendMessageInternal(HELLO_SESSION_MESSAGE, _localDhPublicKeyBuffer, DH_KEY_SIZE_BYTES))
     {
         _state = UNINITIALIZED_SESSION_STATE;
         cleanDhData();
@@ -37,17 +42,14 @@ ClientSession::ClientSession(unsigned int remotePort, const char* remoteIpAddres
     }
 
     // here we need to verify the DH message 2 part
-	/*
     if (!verifySigmaMessage(2, pPayload, (size_t)payloadSize))
     {
         _state = UNINITIALIZED_SESSION_STATE;
         cleanDhData();
         return;
     }
-	*/
 
     // send SIGMA message 3 part
-    /*
 	ByteSmartPtr message3 = prepareSigmaMessage(3);
     if (message3 == NULL)
     {
@@ -55,9 +57,8 @@ ClientSession::ClientSession(unsigned int remotePort, const char* remoteIpAddres
         cleanDhData();
         return;
     }
-	*/
 
-    if (!sendMessageInternal(HELLO_DONE_SESSION_MESSAGE, NULL, 0))
+    if (!sendMessageInternal(HELLO_DONE_SESSION_MESSAGE, message3, message3.size()))
     {
         _state = UNINITIALIZED_SESSION_STATE;
         cleanDhData();

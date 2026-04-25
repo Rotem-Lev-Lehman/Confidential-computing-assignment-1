@@ -24,9 +24,9 @@
 
 
 static constexpr size_t PEM_BUFFER_SIZE_BYTES	= 10000;
-static constexpr size_t HASH_SIZE_BYTES			= ?;
-static constexpr size_t IV_SIZE_BYTES			= ?;
-static constexpr size_t GMAC_SIZE_BYTES			= ?;
+static constexpr size_t HASH_SIZE_BYTES = 32;
+static constexpr size_t IV_SIZE_BYTES   = 12;
+static constexpr size_t GMAC_SIZE_BYTES = 16;
 
 
 int getRandom(void* contextData, BYTE* output, size_t len)
@@ -48,8 +48,22 @@ bool CryptoWrapper::hmac_SHA256(IN const BYTE* key, IN size_t keySizeBytes, IN c
 		return false;
 	}
 
-	// ...
-	return false;
+	int res = mbedtls_md_hmac(
+        md_infoSha256,
+        key,
+        keySizeBytes,
+        message,
+        messageSizeBytes,
+        macBuffer
+    );
+
+    if (res != 0)
+    {
+        printf("mbedtls_md_hmac failed!\n");
+        return false;
+    }
+
+	return true;
 }
 
 
@@ -59,8 +73,25 @@ bool CryptoWrapper::deriveKey_HKDF_SHA256(IN const BYTE* salt, IN size_t saltSiz
 	OUT BYTE* outputBuffer, IN size_t outputBufferSizeBytes)
 {
 	const mbedtls_md_info_t* mdSHA256 = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-	// ...
-	return false;
+	int res = mbedtls_hkdf(
+		mdSHA256,
+		salt,
+		saltSizeBytes,
+		secretMaterial,
+		secretMaterialSizeBytes,
+		context,
+		contextSizeBytes,
+		outputBuffer,
+		outputBufferSizeBytes
+	);
+
+	if (res != 0)
+	{
+		printf("mbedtls_hkdf failed!\n");
+		return false;
+	}
+
+	return true;
 }
 
 
@@ -108,8 +139,57 @@ bool CryptoWrapper::encryptAES_GCM256(IN const BYTE* key, IN size_t keySizeBytes
 		return false;
 	}
 
-	// ...
-	return false;
+	if (getRandom(NULL, iv, IV_SIZE_BYTES) != 0)
+	{
+		printf("getRandom failed!\n");
+		return false;
+	}
+
+	mbedtls_gcm_context gcm;
+	mbedtls_gcm_init(&gcm);
+
+	int res = mbedtls_gcm_setkey(
+		&gcm,
+		MBEDTLS_CIPHER_ID_AES,
+		key,
+		keySizeBytes * 8
+	);
+
+	if (res != 0)
+	{
+		printf("mbedtls_gcm_setkey failed!\n");
+		mbedtls_gcm_free(&gcm);
+		return false;
+	}
+
+	res = mbedtls_gcm_crypt_and_tag(
+		&gcm,
+		MBEDTLS_GCM_ENCRYPT,
+		plaintextSizeBytes,
+		iv,
+		IV_SIZE_BYTES,
+		aad,
+		aadSizeBytes,
+		plaintext,
+		ciphertextBuffer + IV_SIZE_BYTES,
+		GMAC_SIZE_BYTES,
+		mac
+	);
+
+	if (res != 0)
+	{
+		printf("mbedtls_gcm_crypt_and_tag failed!\n");
+		mbedtls_gcm_free(&gcm);
+		return false;
+	}
+
+	memcpy(ciphertextBuffer, iv, IV_SIZE_BYTES);
+	memcpy(ciphertextBuffer + IV_SIZE_BYTES + plaintextSizeBytes, mac, GMAC_SIZE_BYTES);
+
+	*pCiphertextSizeBytes = ciphertextSizeBytes;
+
+	mbedtls_gcm_free(&gcm);
+	return true;
 }
 
 
@@ -143,14 +223,54 @@ bool CryptoWrapper::decryptAES_GCM256(IN const BYTE* key, IN size_t keySizeBytes
 		return false;
 	}
 
-	// ...
+	const BYTE* iv = ciphertext;
+	const BYTE* encryptedData = ciphertext + IV_SIZE_BYTES;
+	const BYTE* mac = ciphertext + IV_SIZE_BYTES + plaintextSizeBytes;
+
+	mbedtls_gcm_context gcm;
+	mbedtls_gcm_init(&gcm);
+
+	int res = mbedtls_gcm_setkey(
+		&gcm,
+		MBEDTLS_CIPHER_ID_AES,
+		key,
+		keySizeBytes * 8
+	);
+
+	if (res != 0)
+	{
+		printf("mbedtls_gcm_setkey failed!\n");
+		mbedtls_gcm_free(&gcm);
+		return false;
+	}
+
+	res = mbedtls_gcm_auth_decrypt(
+		&gcm,
+		plaintextSizeBytes,
+		iv,
+		IV_SIZE_BYTES,
+		aad,
+		aadSizeBytes,
+		mac,
+		GMAC_SIZE_BYTES,
+		encryptedData,
+		plaintextBuffer
+	);
+
+	mbedtls_gcm_free(&gcm);
+
+	if (res != 0)
+	{
+		printf("mbedtls_gcm_auth_decrypt failed!\n");
+		return false;
+	}
 	
 
 	if (pPlaintextSizeBytes != NULL)
 	{
 		*pPlaintextSizeBytes = plaintextSizeBytes;
 	}
-	return false;
+	return true;
 }
 
 
@@ -171,7 +291,13 @@ bool CryptoWrapper::readRSAKeyFromFile(IN const char* keyFilename, IN const char
 		return false;
 	}
 
-	int res = mbedtls_pk_parse_key(newContext, bufferSmartPtr, bufferSmartPtr.size(), (const BYTE*)filePassword, strnlen_s(filePassword, MAX_PASSWORD_SIZE_BYTES), getRandom, NULL);
+	int res = mbedtls_pk_parse_key(
+		newContext,
+		bufferSmartPtr,
+		bufferSmartPtr.size(),
+		(const BYTE*)filePassword,
+		strnlen_s(filePassword, MAX_PASSWORD_SIZE_BYTES)
+	);
 	if (res != 0)
 	{
 		printf("Error during mbedtls_pk_parse_key()\n");
@@ -195,8 +321,53 @@ bool CryptoWrapper::signMessageRsa3072Pss(IN const BYTE* message, IN size_t mess
 		return false;
 	}
 
-	// ...
-	return false;
+	BYTE hash[HASH_SIZE_BYTES];
+
+	int res = mbedtls_md(
+		mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
+		message,
+		messageSizeBytes,
+		hash
+	);
+
+	if (res != 0)
+	{
+		printf("mbedtls_md failed!\n");
+		return false;
+	}
+
+	if (mbedtls_pk_get_type(privateKeyContext) != MBEDTLS_PK_RSA)
+	{
+		printf("Private key is not RSA!\n");
+		return false;
+	}
+
+	mbedtls_rsa_context* rsa = mbedtls_pk_rsa(*privateKeyContext);
+
+	mbedtls_rsa_set_padding(
+		rsa,
+		MBEDTLS_RSA_PKCS_V21,
+		MBEDTLS_MD_SHA256
+	);
+
+	res = mbedtls_rsa_rsassa_pss_sign(
+		rsa,
+		getRandom,
+		NULL,
+		MBEDTLS_RSA_PRIVATE,
+		MBEDTLS_MD_SHA256,
+		HASH_SIZE_BYTES,
+		hash,
+		signatureBuffer
+	);
+
+	if (res != 0)
+	{
+		printf("mbedtls_rsa_rsassa_pss_sign failed!\n");
+		return false;
+	}
+
+	return true;
 }
 
 
@@ -208,8 +379,49 @@ bool CryptoWrapper::verifyMessageRsa3072Pss(IN const BYTE* message, IN size_t me
 		return false;
 	}
 
-	// ...
-	return false;
+	BYTE hash[HASH_SIZE_BYTES];
+
+	int res = mbedtls_md(
+		mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
+		message,
+		messageSizeBytes,
+		hash
+	);
+
+	if (res != 0)
+	{
+		printf("mbedtls_md failed!\n");
+		return false;
+	}
+
+	if (mbedtls_pk_get_type(publicKeyContext) != MBEDTLS_PK_RSA)
+	{
+		printf("Public key is not RSA!\n");
+		return false;
+	}
+
+	mbedtls_rsa_context* rsa = mbedtls_pk_rsa(*publicKeyContext);
+
+	mbedtls_rsa_set_padding(
+		rsa,
+		MBEDTLS_RSA_PKCS_V21,
+		MBEDTLS_MD_SHA256
+	);
+
+	res = mbedtls_rsa_rsassa_pss_verify(
+		rsa,
+		NULL,
+		NULL,
+		MBEDTLS_RSA_PUBLIC,
+		MBEDTLS_MD_SHA256,
+		HASH_SIZE_BYTES,
+		hash,
+		signature
+	);
+
+	*result = (res == 0);
+
+	return true;
 }
 
 
@@ -274,17 +486,93 @@ bool CryptoWrapper::startDh(OUT DhContext** pDhContext, OUT BYTE* publicKeyBuffe
 	mbedtls_mpi_read_binary(&G, gBin, sizeof(gBin));
 
 
-	// ...
+	int res = mbedtls_dhm_set_group(dhContext, &P, &G);
+	if (res != 0)
+	{
+		printf("mbedtls_dhm_set_group failed!\n");
+		mbedtls_mpi_free(&P);
+		mbedtls_mpi_free(&G);
+		cleanDhContext(&dhContext);
+		return false;
+	}
 
-	cleanDhContext(&dhContext);
-	return false;
+	if (publicKeyBufferSizeBytes < DH_KEY_SIZE_BYTES)
+	{
+		printf("DH public key buffer too small!\n");
+		mbedtls_mpi_free(&P);
+		mbedtls_mpi_free(&G);
+		cleanDhContext(&dhContext);
+		return false;
+	}
+
+	res = mbedtls_dhm_make_public(
+		dhContext,
+		DH_KEY_SIZE_BYTES,
+		publicKeyBuffer,
+		DH_KEY_SIZE_BYTES,
+		getRandom,
+		NULL
+	);
+
+	mbedtls_mpi_free(&P);
+	mbedtls_mpi_free(&G);
+
+	if (res != 0)
+	{
+		printf("mbedtls_dhm_make_public failed!\n");
+		cleanDhContext(&dhContext);
+		return false;
+	}
+
+	cleanDhContext(pDhContext);
+	*pDhContext = dhContext;
+	return true;
 }
 
 
 bool CryptoWrapper::getDhSharedSecret(INOUT DhContext* dhContext, IN const BYTE* peerPublicKey, IN size_t peerPublicKeySizeBytes, OUT BYTE* sharedSecretBuffer, IN size_t sharedSecretBufferSizeBytes)
 {
-	// ...
-	return false;
+	if (dhContext == NULL || peerPublicKey == NULL || sharedSecretBuffer == NULL)
+	{
+		return false;
+	}
+
+	if (peerPublicKeySizeBytes != DH_KEY_SIZE_BYTES || sharedSecretBufferSizeBytes < DH_KEY_SIZE_BYTES)
+	{
+		printf("DH buffer size is wrong!\n");
+		return false;
+	}
+
+	int res = mbedtls_dhm_read_public(
+		dhContext,
+		peerPublicKey,
+		peerPublicKeySizeBytes
+	);
+
+	if (res != 0)
+	{
+		printf("mbedtls_dhm_read_public failed!\n");
+		return false;
+	}
+
+	size_t olen = 0;
+
+	res = mbedtls_dhm_calc_secret(
+		dhContext,
+		sharedSecretBuffer,
+		sharedSecretBufferSizeBytes,
+		&olen,
+		getRandom,
+		NULL
+	);
+
+	if (res != 0)
+	{
+		printf("mbedtls_dhm_calc_secret failed!\n");
+		return false;
+	}
+
+	return true;
 }
 
 
@@ -321,7 +609,15 @@ bool CryptoWrapper::checkCertificate(IN const BYTE* cACcertBuffer, IN size_t cAC
 		return false;
 	}
 
-	// ...
+	res = mbedtls_x509_crt_verify(
+		&clicert,
+		&cacert,
+		NULL,
+		expectedCN,
+		&flags,
+		NULL,
+		NULL
+	);
 
 	mbedtls_x509_crt_free(&cacert);
 	mbedtls_x509_crt_free(&clicert);
