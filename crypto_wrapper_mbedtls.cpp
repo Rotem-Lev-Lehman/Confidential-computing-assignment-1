@@ -520,44 +520,22 @@ bool CryptoWrapper::checkCertificate(IN const BYTE* cACcertBuffer, IN size_t cAC
 		return false;
 	}
 
-	// mine
-	// 2. Verify the certificate chain and validity
-    // This checks if 'clicert' was signed by 'cacert' and is currently valid
-    res = mbedtls_x509_crt_verify(&clicert, &cacert, NULL, NULL, &flags, NULL, NULL);
-    if (res != 0) {
-        printf("Certificate verification failed with flags: 0x%08x\n", flags);
-        // We leave res as non-zero so the function returns false
-    } else {
-        // 3. Chain is valid, now check the Common Name (CN)
-        char cnBuffer[256];
-        // mbedtls_x509_dn_gets extracts the Subject name into a string (e.g., "CN=Alice, O=Org")
-        res = mbedtls_x509_dn_gets(cnBuffer, sizeof(cnBuffer), &clicert.subject);
-        if (res < 0) {
-            res = -1; // Extraction failed
-        } else {
-            // Precise matching: look for "CN=" and ensure expectedCN matches the full value
-            res = -1; // Default to mismatch
-            const char* needle = "CN=";
-            const char* p = cnBuffer;
-            size_t expectedLen = strlen(expectedCN);
+	// mine: Use the built-in library verification which checks both the trust chain 
+	// AND the identity (CN or SAN) automatically and securely.
+	res = mbedtls_x509_crt_verify(
+		&clicert,
+		&cacert,
+		NULL,
+		expectedCN,
+		&flags,
+		NULL,
+		NULL
+	);
 
-            while ((p = strstr(p, needle)) != NULL) {
-                const char* valStart = p + 3;
-                // Verify the value matches expectedCN AND is followed by a delimiter or end-of-string
-                if (strncmp(valStart, expectedCN, expectedLen) == 0 &&
-                    (valStart[expectedLen] == '\0' || valStart[expectedLen] == ',' || valStart[expectedLen] == ' ')) {
-                    res = 0;
-                    break;
-                }
-                p++; // Keep searching if this wasn't the right one
-            }
-
-            if (res != 0) {
-                printf("CN mismatch! Expected: %s, Found: %s\n", expectedCN, cnBuffer);
-            }
-        }
-    }
-	//
+	if (res != 0)
+	{
+		printf("Certificate verification failed with flags: 0x%08x\n", flags);
+	}
 
 	mbedtls_x509_crt_free(&cacert);
 	mbedtls_x509_crt_free(&clicert);
