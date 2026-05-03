@@ -93,8 +93,7 @@ void Session::destroySession()
 
         if (_privateKeyPassword != NULL)
         {
-            // we better clean it using some Utils function
-            // ...
+            Utils::secureCleanMemory((BYTE*)_privateKeyPassword, strlen(_privateKeyPassword));
         }
     }
     else
