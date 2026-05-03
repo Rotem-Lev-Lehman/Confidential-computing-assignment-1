@@ -24,7 +24,7 @@ ClientSession::ClientSession(unsigned int remotePort, const char* remoteIpAddres
         cleanDhData();
         return;
     }
-
+    // sending unencrypted message
     if (!sendMessageInternal(HELLO_SESSION_MESSAGE, _localDhPublicKeyBuffer, DH_KEY_SIZE_BYTES)) {
         _state = UNINITIALIZED_SESSION_STATE;
         cleanDhData();
