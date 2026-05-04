@@ -39,6 +39,7 @@ Session::Session(const char* keyFilename, char* password, const char* certFilena
     _rootCaCertFilename = rootCaFilename;
     _expectedRemoteIdentityString = peerIdentity;
     memset(_sessionKey, 0, SYMMETRIC_KEY_SIZE_BYTES);
+    _dhContext = NULL; // not necessary but clears uninitialized pointer
 
     _state = INITIALIZED_SESSION_STATE;
 }
@@ -161,10 +162,7 @@ void Session::cleanDhData()
     // ...
 	// 1. Clean the mbedtls Diffie-Hellman context and free its allocated memory using the CryptoWrapper.
 	// This prevents memory leaks and ensures the internal state of the DH object is securely cleared.
-	if (_dhContext != NULL)
-	{
-		CryptoWrapper::cleanDhContext(&_dhContext);
-	}
+	CryptoWrapper::cleanDhContext(&_dhContext);
 
 	// 2. Securely zero out the buffers that stored the local public key, the remote public key, and the shared secret.
 	// This is important to ensure no sensitive material remains in memory after the session is closed.

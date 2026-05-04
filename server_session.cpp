@@ -144,6 +144,7 @@ Session::ReceiveResult ServerSession::receiveMessage(BYTE* buffer, size_t buffer
         ByteSmartPtr message2 = newSession->prepareSigmaMessage(2);
         if (message2 == NULL)
         {
+            delete newSession;
             return RR_FATAL_ERROR;
         }
 		//*/
@@ -152,7 +153,7 @@ Session::ReceiveResult ServerSession::receiveMessage(BYTE* buffer, size_t buffer
         if (!newSession->sendMessageInternal(HELLO_BACK_SESSION_MESSAGE, message2, message2.size()))
         {
             printf("Error during receive - error sending response to new session\n");
-            newSession->cleanDhData();
+            delete newSession;
             return RR_FATAL_ERROR;
         }
 
