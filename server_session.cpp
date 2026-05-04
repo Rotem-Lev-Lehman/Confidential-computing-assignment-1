@@ -133,7 +133,6 @@ Session::ReceiveResult ServerSession::receiveMessage(BYTE* buffer, size_t buffer
         if (!CryptoWrapper::getDhSharedSecret(newSession->_dhContext, newSession->_remoteDhPublicKeyBuffer, DH_KEY_SIZE_BYTES, newSession->_sharedDhSecretBuffer, DH_KEY_SIZE_BYTES))
         {
             printf("Error calculating shared secret on server\n");
-            newSession->cleanDhData();
             delete newSession;
             return RR_FATAL_ERROR;
         }
