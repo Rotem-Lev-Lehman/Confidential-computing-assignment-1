@@ -128,8 +128,6 @@ Session::ReceiveResult ServerSession::receiveMessage(BYTE* buffer, size_t buffer
         }
 
         // 3. Compute the shared Diffie-Hellman secret.
-        // Unlike the client, the server can (and must) compute the shared secret now, 
-        // because it needs the derived MAC key to create the identity proof in Message #2.
         if (!CryptoWrapper::getDhSharedSecret(newSession->_dhContext, newSession->_remoteDhPublicKeyBuffer, DH_KEY_SIZE_BYTES, newSession->_sharedDhSecretBuffer, DH_KEY_SIZE_BYTES))
         {
             printf("Error calculating shared secret on server\n");

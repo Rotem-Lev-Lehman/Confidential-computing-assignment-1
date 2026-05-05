@@ -135,6 +135,10 @@ bool CryptoWrapper::encryptAES_GCM256(IN const BYTE* key, IN size_t keySizeBytes
 	}
 
 	// mine
+	if (key == NULL || keySizeBytes != SYMMETRIC_KEY_SIZE_BYTES)
+	{
+		return false;
+	}
 
 	// 1. Generate a random IV 
     if (getRandom(NULL, iv, IV_SIZE_BYTES) != 0) {
@@ -225,7 +229,6 @@ bool CryptoWrapper::decryptAES_GCM256(IN const BYTE* key, IN size_t keySizeBytes
     }
 
     // 4. Authenticate and Decrypt
-    // plaintextSizeBytes was already calculated at the top of your snippet
     res = mbedtls_gcm_auth_decrypt(&ctx, plaintextSizeBytes,
                                    iv, IV_SIZE_BYTES,
                                    aad, aadSizeBytes,
@@ -298,7 +301,6 @@ bool CryptoWrapper::signMessageRsa3072Pss(IN const BYTE* message, IN size_t mess
 	}
 
     // 2. Set the RSA padding to PSS (as requested by the function name and slides)
-    // mbedtls_pk_rsa extracts the underlying RSA structure from the PK context
     mbedtls_rsa_context* rsa = mbedtls_pk_rsa(*privateKeyContext);
 	if (mbedtls_pk_get_type(privateKeyContext) != MBEDTLS_PK_RSA) { 
 		return false;
@@ -306,7 +308,6 @@ bool CryptoWrapper::signMessageRsa3072Pss(IN const BYTE* message, IN size_t mess
     mbedtls_rsa_set_padding(rsa, MBEDTLS_RSA_PKCS_V21, MBEDTLS_MD_SHA256);
 
     // 3. Sign the hash
-    // The signature size will be written to a dummy variable since we know it's 384 bytes
     size_t sigLen = 0;
     res = mbedtls_pk_sign(privateKeyContext, MBEDTLS_MD_SHA256, hash, 0, signatureBuffer, &sigLen, getRandom, NULL);
 
@@ -340,14 +341,14 @@ bool CryptoWrapper::verifyMessageRsa3072Pss(IN const BYTE* message, IN size_t me
     if (res != 0) return false;
 
     // 3. Set RSA padding to PSS
-    mbedtls_rsa_context* rsa = mbedtls_pk_rsa(*publicKeyContext);
-	if (mbedtls_pk_get_type(publicKeyContext) != MBEDTLS_PK_RSA) { 
+	if (publicKeyContext == NULL || mbedtls_pk_get_type(publicKeyContext) != MBEDTLS_PK_RSA) { 
 		return false;
 	}
+    mbedtls_rsa_context* rsa = mbedtls_pk_rsa(*publicKeyContext);
     mbedtls_rsa_set_padding(rsa, MBEDTLS_RSA_PKCS_V21, MBEDTLS_MD_SHA256);
 
     // 4. Verify the signature
-    res = mbedtls_pk_verify(publicKeyContext, MBEDTLS_MD_SHA256, hash, 0, signature, signatureSizeBytes);
+    res = mbedtls_pk_verify(publicKeyContext, MBEDTLS_MD_SHA256, hash, HASH_SIZE_BYTES, signature, signatureSizeBytes);
 
     // 5. Handle the result
     if (res == 0)
@@ -361,7 +362,7 @@ bool CryptoWrapper::verifyMessageRsa3072Pss(IN const BYTE* message, IN size_t me
         printf("mbedtls_pk_verify failed: signature is invalid\n");
     }
 
-    return true; // Return true because the verification process executed successfully
+    return true; 
 }
 
 
@@ -480,6 +481,12 @@ bool CryptoWrapper::getDhSharedSecret(INOUT DhContext* dhContext, IN const BYTE*
     if (res != 0)
     {
         printf("mbedtls_dhm_calc_secret failed: -0x%04x\n", (unsigned int)-res);
+        return false;
+    }
+
+    if (dest_len != DH_KEY_SIZE_BYTES)
+    {
+        printf("mbedtls_dhm_calc_secret failed: shared secret size is incorrect\n");
         return false;
     }
 

@@ -320,6 +320,15 @@ bool Session::verifySigmaMessage(unsigned int messageType, const BYTE* pPayload,
         return false;
     }
 
+    // Verify part sizes
+    if (parts[0].partSize != DH_KEY_SIZE_BYTES ||
+        parts[2].partSize != SIGNATURE_SIZE_BYTES ||
+        parts[3].partSize != HMAC_SIZE_BYTES)
+    {
+        printf("verifySigmaMessage #%d failed - message part size is wrong\n", messageType);
+        return false;
+    }
+
     // Load root CA certificate for verification
     ByteSmartPtr rootCaSmartPtr = Utils::readBufferFromFile(_rootCaCertFilename);
     if (rootCaSmartPtr == NULL) {
@@ -330,7 +339,6 @@ bool Session::verifySigmaMessage(unsigned int messageType, const BYTE* pPayload,
     // we will now verify if the received certificate belongs to the expected remote entity
     // ...
 	// 1. Verify the remote certificate chain against our Root CA and check the expected identity (CN).
-    // This step ensures the certificate is authentic, trusted, and belongs to the entity we intend to talk to.
 	if (!CryptoWrapper::checkCertificate(rootCaSmartPtr, rootCaSmartPtr.size(), parts[1].part, parts[1].partSize, _expectedRemoteIdentityString))
 	{
 		printf("verifySigmaMessage #%d failed - Certificate verification failed\n", messageType);
@@ -348,8 +356,6 @@ bool Session::verifySigmaMessage(unsigned int messageType, const BYTE* pPayload,
     // now we will verify if the signature over the concatenated public keys is ok
     // ...
 	// 2. Concatenate the public keys (Remote PK || Local PK) and verify the signature.
-	// Binding the public keys into the signature prevents "Man-in-the-Middle" attacks by ensuring 
-    // both parties are signing the exact same key exchange data.
 	ByteSmartPtr concatenatedPublicKeys = concat(2, parts[0].part, DH_KEY_SIZE_BYTES, _localDhPublicKeyBuffer, DH_KEY_SIZE_BYTES);
 	bool sigResult = false;
 	if (!CryptoWrapper::verifyMessageRsa3072Pss(concatenatedPublicKeys, concatenatedPublicKeys.size(), peerPublicKeyContext, parts[2].part, parts[2].partSize, &sigResult) || !sigResult)
@@ -472,8 +478,7 @@ bool Session::decryptMessage(MessageHeader* header, BYTE* buffer, size_t* pPlain
 	size_t plaintextSize = CryptoWrapper::getPlaintextSizeAES_GCM256(ciphertextSize);
 	
 	// 2. Allocate a temporary buffer for the decryption process.
-	// We decrypt into a temporary buffer first to ensure we don't overwrite the ciphertext 
-    // until the authentication (MAC check) is successful.
+	// We decrypt into a temporary buffer first to ensure we don't overwrite the ciphertext until the authentication (MAC check) is successful.
 	BYTE* plaintextBuffer = (BYTE*)Utils::allocateBuffer(plaintextSize);
 	if (plaintextBuffer == NULL)
 	{
