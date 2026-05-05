@@ -12,11 +12,20 @@ ClientSession::ClientSession(unsigned int remotePort, const char* remoteIpAddres
     }
 
     setRemoteAddress(remoteIpAddress, remotePort);
-
+    /*
     // Perhaps we can use the first message as Sigma message #1?
     BYTE dummy[DH_KEY_SIZE_BYTES];
     if (!sendMessageInternal(HELLO_SESSION_MESSAGE, dummy, DH_KEY_SIZE_BYTES))
+    */
+   // initialize x, p, g
+    if (!CryptoWrapper::startDh(&_dhContext, _localDhPublicKeyBuffer, DH_KEY_SIZE_BYTES))
     {
+        _state = UNINITIALIZED_SESSION_STATE;
+        cleanDhData();
+        return;
+    }
+    // sending unencrypted message
+    if (!sendMessageInternal(HELLO_SESSION_MESSAGE, _localDhPublicKeyBuffer, DH_KEY_SIZE_BYTES)) {
         _state = UNINITIALIZED_SESSION_STATE;
         cleanDhData();
         return;
@@ -28,8 +37,14 @@ ClientSession::ClientSession(unsigned int remotePort, const char* remoteIpAddres
 
     BYTE* pPayload = NULL;
     size_t payloadSize = 0;
-    bool rcvResult = receiveMessage(messageBuffer, MESSAGE_BUFFER_SIZE_BYTES, 10, &pPayload, &payloadSize);
-    if (!rcvResult || _state != HELLO_BACK_SESSION_MESSAGE)
+    // bool rcvResult = receiveMessage(messageBuffer, MESSAGE_BUFFER_SIZE_BYTES, 10, &pPayload, &payloadSize);
+    /* response contains: servers DH public key, 
+                            servers certificate, 
+                            a digital signature (of the DH public keys concatenated: ServerPK||ClientPK)
+                            MAC (of the servers certificate, using a key derived from the shared secret g^xy) */
+    Session::ReceiveResult rcvResult = receiveMessage(messageBuffer, MESSAGE_BUFFER_SIZE_BYTES, 10, &pPayload, &payloadSize);
+    // if (!rcvResult || _state != HELLO_BACK_SESSION_MESSAGE)
+    if (rcvResult != RR_PROTOCOL_MESSAGE || _state != HELLO_BACK_SESSION_MESSAGE)
     {
         _state = UNINITIALIZED_SESSION_STATE;
         cleanDhData();
@@ -37,17 +52,25 @@ ClientSession::ClientSession(unsigned int remotePort, const char* remoteIpAddres
     }
 
     // here we need to verify the DH message 2 part
-	/*
+	///*
+    /* check that the servers crt is signed by the root ca
+    check that the certificates name matches peerIdentity
+    verify the servers RSA singature of the DH public keys
+    calculate the shared secret g^xy
+    derive a mac key using the shared secret and calculate mac of servers crt using mackey, then compare to what the server sent (should match)*/
     if (!verifySigmaMessage(2, pPayload, (size_t)payloadSize))
     {
         _state = UNINITIALIZED_SESSION_STATE;
         cleanDhData();
         return;
     }
-	*/
+	//*/
 
     // send SIGMA message 3 part
-    /*
+    ///*
+    /* just like message 2 the server sent but opposite.
+        The digital signature is of ClientPK||ServerPK
+    */
 	ByteSmartPtr message3 = prepareSigmaMessage(3);
     if (message3 == NULL)
     {
@@ -55,9 +78,10 @@ ClientSession::ClientSession(unsigned int remotePort, const char* remoteIpAddres
         cleanDhData();
         return;
     }
-	*/
+	//*/
 
-    if (!sendMessageInternal(HELLO_DONE_SESSION_MESSAGE, NULL, 0))
+    // if (!sendMessageInternal(HELLO_DONE_SESSION_MESSAGE, NULL, 0))
+    if (!sendMessageInternal(HELLO_DONE_SESSION_MESSAGE, message3, message3.size()))
     {
         _state = UNINITIALIZED_SESSION_STATE;
         cleanDhData();
@@ -65,6 +89,7 @@ ClientSession::ClientSession(unsigned int remotePort, const char* remoteIpAddres
     }
 
     // now we will calculate the session key
+    // AES-GCM encryption keys
     deriveSessionKey();
 
     _state = DATA_SESSION_MESSAGE;
@@ -131,7 +156,7 @@ Session::ReceiveResult ClientSession::receiveMessage(BYTE* buffer, size_t buffer
         return RR_SESSION_CLOSED;
     case HELLO_SESSION_MESSAGE:
         return RR_BAD_MESSAGE;
-    case HELLO_BACK_SESSION_MESSAGE:
+    case HELLO_BACK_SESSION_MESSAGE: //this is where we receive SIGMA message 2
         if (_state == HELLO_SESSION_MESSAGE)
         {
             _sessionId = header->sessionId;

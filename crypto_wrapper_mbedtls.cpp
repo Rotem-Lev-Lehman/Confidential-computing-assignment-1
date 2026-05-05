@@ -24,9 +24,9 @@
 
 
 static constexpr size_t PEM_BUFFER_SIZE_BYTES	= 10000;
-static constexpr size_t HASH_SIZE_BYTES			= ?;
-static constexpr size_t IV_SIZE_BYTES			= ?;
-static constexpr size_t GMAC_SIZE_BYTES			= ?;
+static constexpr size_t HASH_SIZE_BYTES			= 32; // 256 / 8 = 32
+static constexpr size_t IV_SIZE_BYTES			= 12; //96 / 8 = 12
+static constexpr size_t GMAC_SIZE_BYTES			= 16; // 128 / 8 = 16
 
 
 int getRandom(void* contextData, BYTE* output, size_t len)
@@ -48,8 +48,16 @@ bool CryptoWrapper::hmac_SHA256(IN const BYTE* key, IN size_t keySizeBytes, IN c
 		return false;
 	}
 
-	// ...
-	return false;
+	// mine
+	int result = mbedtls_md_hmac(md_infoSha256, key, keySizeBytes, message, messageSizeBytes, macBuffer);
+
+    if (result != 0)
+    {
+        printf("mbedtls_md_hmac failed with error code: %d\n", result);
+        return false;
+    }
+
+	return true;
 }
 
 
@@ -59,7 +67,25 @@ bool CryptoWrapper::deriveKey_HKDF_SHA256(IN const BYTE* salt, IN size_t saltSiz
 	OUT BYTE* outputBuffer, IN size_t outputBufferSizeBytes)
 {
 	const mbedtls_md_info_t* mdSHA256 = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-	// ...
+	
+	// mine
+    if (mdSHA256 == NULL)
+    {
+        printf("mbedtls_md_info_from_type failed for SHA256\n");
+        return false;
+    }
+
+	int result = mbedtls_hkdf(mdSHA256, 
+                              salt, saltSizeBytes, 
+                              secretMaterial, secretMaterialSizeBytes, 
+                              context, contextSizeBytes, 
+                              outputBuffer, outputBufferSizeBytes);
+
+	if (result == 0) {
+		return true;
+	}
+
+	printf("mbedtls_hkdf failed with error code: %d\n", result);
 	return false;
 }
 
@@ -108,8 +134,50 @@ bool CryptoWrapper::encryptAES_GCM256(IN const BYTE* key, IN size_t keySizeBytes
 		return false;
 	}
 
-	// ...
-	return false;
+	// mine
+	if (key == NULL || keySizeBytes != SYMMETRIC_KEY_SIZE_BYTES)
+	{
+		return false;
+	}
+
+	// 1. Generate a random IV 
+    if (getRandom(NULL, iv, IV_SIZE_BYTES) != 0) {
+        return false;
+    }
+
+    // 2. Initialize GCM Context
+    mbedtls_gcm_context ctx;
+    mbedtls_gcm_init(&ctx);
+
+    // 3. Set the encryption key (AES-256)
+    int res = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, (unsigned int)(keySizeBytes * 8));
+    if (res != 0) {
+        mbedtls_gcm_free(&ctx);
+        return false;
+    }
+
+    // 4. Encrypt and generate Tag
+    // We point the internal output to the correct offset in ciphertextBuffer (after the IV)
+    res = mbedtls_gcm_crypt_and_tag(&ctx, MBEDTLS_GCM_ENCRYPT, plaintextSizeBytes, 
+                                    iv, IV_SIZE_BYTES, 
+                                    aad, aadSizeBytes, 
+                                    plaintext, 
+                                    ciphertextBuffer + IV_SIZE_BYTES, // Output location
+                                    GMAC_SIZE_BYTES, mac);            // Tag size and destination
+
+    mbedtls_gcm_free(&ctx);
+
+    if (res != 0) return false;
+
+    // 5. Pack the Buffer: [IV] + [Ciphertext (already there)] + [MAC]
+    memcpy(ciphertextBuffer, iv, IV_SIZE_BYTES);
+    memcpy(ciphertextBuffer + IV_SIZE_BYTES + plaintextSizeBytes, mac, GMAC_SIZE_BYTES);
+
+    // 6. Set the total size of the packed output
+    if (pCiphertextSizeBytes != NULL) {
+        *pCiphertextSizeBytes = ciphertextSizeBytes;
+    }
+	return true;
 }
 
 
@@ -143,14 +211,44 @@ bool CryptoWrapper::decryptAES_GCM256(IN const BYTE* key, IN size_t keySizeBytes
 		return false;
 	}
 
-	// ...
-	
+	// mine
+	// 1. Unpack the buffer
+    const BYTE* iv = ciphertext; 
+    const BYTE* actualCiphertext = ciphertext + IV_SIZE_BYTES;
+    const BYTE* mac = ciphertext + ciphertextSizeBytes - GMAC_SIZE_BYTES;
 
-	if (pPlaintextSizeBytes != NULL)
-	{
-		*pPlaintextSizeBytes = plaintextSizeBytes;
-	}
-	return false;
+    // 2. Initialize GCM Context
+    mbedtls_gcm_context ctx;
+    mbedtls_gcm_init(&ctx);
+
+    // 3. Set the key
+    int res = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, (unsigned int)(keySizeBytes * 8));
+    if (res != 0) {
+        mbedtls_gcm_free(&ctx);
+        return false;
+    }
+
+    // 4. Authenticate and Decrypt
+    res = mbedtls_gcm_auth_decrypt(&ctx, plaintextSizeBytes,
+                                   iv, IV_SIZE_BYTES,
+                                   aad, aadSizeBytes,
+                                   mac, GMAC_SIZE_BYTES,
+                                   actualCiphertext,
+                                   plaintextBuffer);
+
+    mbedtls_gcm_free(&ctx);
+
+    // 5. Final validation
+    if (res != 0) {
+        printf("GCM Decryption/Authentication failed! Error: %d\n", res);
+        return false;
+    }
+
+    if (pPlaintextSizeBytes != NULL) {
+        *pPlaintextSizeBytes = plaintextSizeBytes;
+    }
+
+    return true;
 }
 
 
@@ -171,7 +269,7 @@ bool CryptoWrapper::readRSAKeyFromFile(IN const char* keyFilename, IN const char
 		return false;
 	}
 
-	int res = mbedtls_pk_parse_key(newContext, bufferSmartPtr, bufferSmartPtr.size(), (const BYTE*)filePassword, strnlen_s(filePassword, MAX_PASSWORD_SIZE_BYTES), getRandom, NULL);
+	int res = mbedtls_pk_parse_key(newContext, bufferSmartPtr, bufferSmartPtr.size(), (const BYTE*)filePassword, strnlen_s(filePassword, MAX_PASSWORD_SIZE_BYTES));
 	if (res != 0)
 	{
 		printf("Error during mbedtls_pk_parse_key()\n");
@@ -194,9 +292,31 @@ bool CryptoWrapper::signMessageRsa3072Pss(IN const BYTE* message, IN size_t mess
 		printf("Signature buffer size is wrong!\n");
 		return false;
 	}
+	// mine
+	// 1. Create a hash of the message
+    BYTE hash[HASH_SIZE_BYTES];
+    int res = mbedtls_md(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), message, messageSizeBytes, hash);
+    if (res != 0) {
+		return false;
+	}
 
-	// ...
-	return false;
+    // 2. Set the RSA padding to PSS (as requested by the function name and slides)
+    mbedtls_rsa_context* rsa = mbedtls_pk_rsa(*privateKeyContext);
+	if (mbedtls_pk_get_type(privateKeyContext) != MBEDTLS_PK_RSA) { 
+		return false;
+	}
+    mbedtls_rsa_set_padding(rsa, MBEDTLS_RSA_PKCS_V21, MBEDTLS_MD_SHA256);
+
+    // 3. Sign the hash
+    size_t sigLen = 0;
+    res = mbedtls_pk_sign(privateKeyContext, MBEDTLS_MD_SHA256, hash, 0, signatureBuffer, &sigLen, getRandom, NULL);
+
+    if (res != 0) {
+        printf("mbedtls_pk_sign failed with error: -0x%04x\n", -res);
+        return false;
+    }
+
+    return true;
 }
 
 
@@ -208,8 +328,41 @@ bool CryptoWrapper::verifyMessageRsa3072Pss(IN const BYTE* message, IN size_t me
 		return false;
 	}
 
-	// ...
-	return false;
+	// mine
+	// 1. Initial Safety Checks
+    if (result == NULL) { 
+		return false;
+	}
+    *result = false;
+
+	// 2. Hash the message (Must use the same hash used in signing: SHA-256)
+    BYTE hash[HASH_SIZE_BYTES];
+    int res = mbedtls_md(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), message, messageSizeBytes, hash);
+    if (res != 0) return false;
+
+    // 3. Set RSA padding to PSS
+	if (publicKeyContext == NULL || mbedtls_pk_get_type(publicKeyContext) != MBEDTLS_PK_RSA) { 
+		return false;
+	}
+    mbedtls_rsa_context* rsa = mbedtls_pk_rsa(*publicKeyContext);
+    mbedtls_rsa_set_padding(rsa, MBEDTLS_RSA_PKCS_V21, MBEDTLS_MD_SHA256);
+
+    // 4. Verify the signature
+    res = mbedtls_pk_verify(publicKeyContext, MBEDTLS_MD_SHA256, hash, HASH_SIZE_BYTES, signature, signatureSizeBytes);
+
+    // 5. Handle the result
+    if (res == 0)
+    {
+        *result = true;
+    }
+    else
+    {
+        // A non-zero result here means the signature was mathematically invalid
+        *result = false;
+        printf("mbedtls_pk_verify failed: signature is invalid\n");
+    }
+
+    return true; 
 }
 
 
@@ -274,17 +427,70 @@ bool CryptoWrapper::startDh(OUT DhContext** pDhContext, OUT BYTE* publicKeyBuffe
 	mbedtls_mpi_read_binary(&G, gBin, sizeof(gBin));
 
 
-	// ...
+	// mine
+	// 3. Set the group into the context
+    int res = mbedtls_dhm_set_group(dhContext, &P, &G);
+    mbedtls_mpi_free(&P); mbedtls_mpi_free(&G); // Free temps once loaded
+    
+    if (res != 0) {
+        cleanDhContext(&dhContext);
+        return false;
+    }
 
-	cleanDhContext(&dhContext);
-	return false;
+    // 4. Create our own DH keypair (Private secret 'a' and Public 'A')
+    // This generates the internal random private value automatically
+    res = mbedtls_dhm_make_public(dhContext, (int)dhContext->len, 
+                                  publicKeyBuffer, publicKeyBufferSizeBytes, 
+                                  getRandom, NULL);
+
+    if (res != 0) {
+        printf("mbedtls_dhm_make_public failed: -0x%04x\n", -res);
+        cleanDhContext(&dhContext);
+        return false;
+    }
+
+    // 5. Hand the context back to the caller
+    *pDhContext = dhContext;
+    return true;
 }
 
 
 bool CryptoWrapper::getDhSharedSecret(INOUT DhContext* dhContext, IN const BYTE* peerPublicKey, IN size_t peerPublicKeySizeBytes, OUT BYTE* sharedSecretBuffer, IN size_t sharedSecretBufferSizeBytes)
 {
-	// ...
-	return false;
+	// mine
+	if (dhContext == NULL || peerPublicKey == NULL || sharedSecretBuffer == NULL)
+    {
+        return false;
+    }
+
+    // 1. Import the peer's public key into the DH context
+    // This parses the incoming bytes into the internal math structure
+    int res = mbedtls_dhm_read_public(dhContext, peerPublicKey, peerPublicKeySizeBytes);
+    if (res != 0)
+    {
+        printf("mbedtls_dhm_read_public failed: -0x%04x\n", (unsigned int)-res);
+        return false;
+    }
+
+    // 2. Calculate the shared secret
+    // dest_len will store the actual number of bytes written
+    size_t dest_len = 0;
+    res = mbedtls_dhm_calc_secret(dhContext, sharedSecretBuffer, sharedSecretBufferSizeBytes, 
+                                  &dest_len, getRandom, NULL);
+
+    if (res != 0)
+    {
+        printf("mbedtls_dhm_calc_secret failed: -0x%04x\n", (unsigned int)-res);
+        return false;
+    }
+
+    if (dest_len != DH_KEY_SIZE_BYTES)
+    {
+        printf("mbedtls_dhm_calc_secret failed: shared secret size is incorrect\n");
+        return false;
+    }
+
+    return true;
 }
 
 
@@ -321,7 +527,22 @@ bool CryptoWrapper::checkCertificate(IN const BYTE* cACcertBuffer, IN size_t cAC
 		return false;
 	}
 
-	// ...
+	// mine: Use the built-in library verification which checks both the trust chain 
+	// AND the identity (CN or SAN) automatically and securely.
+	res = mbedtls_x509_crt_verify(
+		&clicert,
+		&cacert,
+		NULL,
+		expectedCN,
+		&flags,
+		NULL,
+		NULL
+	);
+
+	if (res != 0)
+	{
+		printf("Certificate verification failed with flags: 0x%08x\n", flags);
+	}
 
 	mbedtls_x509_crt_free(&cacert);
 	mbedtls_x509_crt_free(&clicert);

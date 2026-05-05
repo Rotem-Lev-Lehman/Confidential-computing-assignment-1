@@ -1,0 +1,9 @@
+# Exclude the VS Code configuration folder
+.vscode/
+
+# Exclude all compiled object files
+*.o
+
+# Exclude the specific executable
+crypto_test/crypto_test
+udp_party

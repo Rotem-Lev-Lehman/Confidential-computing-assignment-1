@@ -39,6 +39,7 @@ Session::Session(const char* keyFilename, char* password, const char* certFilena
     _rootCaCertFilename = rootCaFilename;
     _expectedRemoteIdentityString = peerIdentity;
     memset(_sessionKey, 0, SYMMETRIC_KEY_SIZE_BYTES);
+    _dhContext = NULL; // not necessary but clears uninitialized pointer
 
     _state = INITIALIZED_SESSION_STATE;
 }
@@ -93,8 +94,7 @@ void Session::destroySession()
 
         if (_privateKeyPassword != NULL)
         {
-            // we better clean it using some Utils function
-            // ...
+            Utils::secureCleanMemory((BYTE*)_privateKeyPassword, strlen(_privateKeyPassword));
         }
     }
     else
@@ -160,6 +160,16 @@ bool Session::sendMessageInternal(unsigned int type, const BYTE* message, size_t
 void Session::cleanDhData()
 {
     // ...
+	// 1. Clean the mbedtls Diffie-Hellman context and free its allocated memory using the CryptoWrapper.
+	// This prevents memory leaks and ensures the internal state of the DH object is securely cleared.
+	CryptoWrapper::cleanDhContext(&_dhContext);
+
+	// 2. Securely zero out the buffers that stored the local public key, the remote public key, and the shared secret.
+	// This is important to ensure no sensitive material remains in memory after the session is closed.
+	Utils::secureCleanMemory(_localDhPublicKeyBuffer, DH_KEY_SIZE_BYTES);
+	Utils::secureCleanMemory(_remoteDhPublicKeyBuffer, DH_KEY_SIZE_BYTES);
+	Utils::secureCleanMemory(_sharedDhSecretBuffer, DH_KEY_SIZE_BYTES);
+
 }
 
 
@@ -172,6 +182,16 @@ void Session::deriveMacKey(BYTE* macKeyBuffer)
     }
     
     // ...
+	// 3. Derive a session-specific MAC key from the shared Diffie-Hellman secret material.
+	// We use HKDF-SHA256 (HMAC-based Key Derivation Function) to derive a cryptographically strong key.
+	// The context string includes the session ID to ensure the key is unique to this specific session context.
+	if (!CryptoWrapper::deriveKey_HKDF_SHA256(NULL, 0, _sharedDhSecretBuffer, DH_KEY_SIZE_BYTES, 
+                                             (const BYTE*)keyDerivationContext, (size_t)strlen(keyDerivationContext), 
+                                             macKeyBuffer, SYMMETRIC_KEY_SIZE_BYTES))
+	{
+		printf("Error deriving MAC key\n");
+		exit(0);
+	}
 }
 
 
@@ -184,6 +204,17 @@ void Session::deriveSessionKey()
     }
     
     // ...
+	// 4. Derive the main session encryption key from the shared Diffie-Hellman secret material.
+	// This key is used for protecting the data channel (AES-GCM encryption/decryption).
+	// We use HKDF-SHA256 (HMAC-based Key Derivation Function) with a unique context string 
+	// to ensure domain separation from the MAC key derived earlier.
+	if (!CryptoWrapper::deriveKey_HKDF_SHA256(NULL, 0, _sharedDhSecretBuffer, DH_KEY_SIZE_BYTES, 
+                                             (const BYTE*)keyDerivationContext, (size_t)strlen(keyDerivationContext), 
+                                             _sessionKey, SYMMETRIC_KEY_SIZE_BYTES))
+	{
+		printf("Error deriving Session key\n");
+		exit(0);
+	}
 }
 
 
@@ -226,10 +257,39 @@ ByteSmartPtr Session::prepareSigmaMessage(unsigned int messageType)
     }
     BYTE signature[SIGNATURE_SIZE_BYTES];
     // ...
+	// 1. Sign the concatenated public keys (Local PK || Remote PK).
+	// This proves ownership of the private key associated with the certificate and binds the exchange.
+	if (!CryptoWrapper::signMessageRsa3072Pss(conacatenatedPublicKeysSmartPtr, conacatenatedPublicKeysSmartPtr.size(), 
+                                              privateKeyContext, signature, SIGNATURE_SIZE_BYTES))
+	{
+		printf("prepareDhMessage #%d failed - Error signing public keys\n", messageType);
+		CryptoWrapper::cleanKeyContext(&privateKeyContext);
+		cleanDhData();
+		return NULL;
+	}
+
+	// We no longer need the private key context.
+	CryptoWrapper::cleanKeyContext(&privateKeyContext);
 
     // Now we will calculate the MAC over my certiicate
     BYTE calculatedMac[HMAC_SIZE_BYTES];
     // ...
+	// 2. Derive the session-specific MAC key and calculate the HMAC over our certificate.
+	// This binds our identity (the certificate) to the shared secret established by the DH exchange.
+	BYTE macKey[SYMMETRIC_KEY_SIZE_BYTES];
+	deriveMacKey(macKey);
+
+	if (!CryptoWrapper::hmac_SHA256(macKey, SYMMETRIC_KEY_SIZE_BYTES, certBufferSmartPtr, certBufferSmartPtr.size(), 
+                                   calculatedMac, HMAC_SIZE_BYTES))
+	{
+		printf("prepareDhMessage #%d failed - Error calculating HMAC\n", messageType);
+		Utils::secureCleanMemory(macKey, SYMMETRIC_KEY_SIZE_BYTES);
+		cleanDhData();
+		return NULL;
+	}
+
+	// Securely clear the temporary MAC key from the stack.
+	Utils::secureCleanMemory(macKey, SYMMETRIC_KEY_SIZE_BYTES);
 
     // pack all of the parts together
     ByteSmartPtr messageToSend = packMessageParts(4, _localDhPublicKeyBuffer, DH_KEY_SIZE_BYTES, (BYTE*)certBufferSmartPtr, certBufferSmartPtr.size(), signature, SIGNATURE_SIZE_BYTES, calculatedMac, HMAC_SIZE_BYTES);
@@ -260,30 +320,96 @@ bool Session::verifySigmaMessage(unsigned int messageType, const BYTE* pPayload,
         return false;
     }
 
-    // ...
+    // Verify part sizes
+    if (parts[0].partSize != DH_KEY_SIZE_BYTES ||
+        parts[2].partSize != SIGNATURE_SIZE_BYTES ||
+        parts[3].partSize != HMAC_SIZE_BYTES)
+    {
+        printf("verifySigmaMessage #%d failed - message part size is wrong\n", messageType);
+        return false;
+    }
+
+    // Load root CA certificate for verification
+    ByteSmartPtr rootCaSmartPtr = Utils::readBufferFromFile(_rootCaCertFilename);
+    if (rootCaSmartPtr == NULL) {
+        printf("verifySigmaMessage #%d failed - Error reading Root CA certificate\n", messageType);
+        return false;
+    }
 
     // we will now verify if the received certificate belongs to the expected remote entity
     // ...
+	// 1. Verify the remote certificate chain against our Root CA and check the expected identity (CN).
+	if (!CryptoWrapper::checkCertificate(rootCaSmartPtr, rootCaSmartPtr.size(), parts[1].part, parts[1].partSize, _expectedRemoteIdentityString))
+	{
+		printf("verifySigmaMessage #%d failed - Certificate verification failed\n", messageType);
+		return false;
+	}
+
+	// Extract the public key from the validated certificate for signature verification.
+	KeypairContext* peerPublicKeyContext = NULL;
+	if (!CryptoWrapper::getPublicKeyFromCertificate(parts[1].part, parts[1].partSize, &peerPublicKeyContext))
+	{
+		printf("verifySigmaMessage #%d failed - Error getting public key from certificate\n", messageType);
+		return false;
+	}
 
     // now we will verify if the signature over the concatenated public keys is ok
     // ...
+	// 2. Concatenate the public keys (Remote PK || Local PK) and verify the signature.
+	ByteSmartPtr concatenatedPublicKeys = concat(2, parts[0].part, DH_KEY_SIZE_BYTES, _localDhPublicKeyBuffer, DH_KEY_SIZE_BYTES);
+	bool sigResult = false;
+	if (!CryptoWrapper::verifyMessageRsa3072Pss(concatenatedPublicKeys, concatenatedPublicKeys.size(), peerPublicKeyContext, parts[2].part, parts[2].partSize, &sigResult) || !sigResult)
+	{
+		printf("verifySigmaMessage #%d failed - Signature verification failed\n", messageType);
+		CryptoWrapper::cleanKeyContext(&peerPublicKeyContext);
+		return false;
+	}
+	CryptoWrapper::cleanKeyContext(&peerPublicKeyContext);
 
     if (messageType == 2)
     {
         // Now we will calculate the shared secret
         // ...
-
+		// 3. For the client (Message #2), we now have the peer's verified public key and can compute the shared secret.
+        // We store their public key and then use the DH context to derive the master shared secret.
+		memcpy_s(_remoteDhPublicKeyBuffer, DH_KEY_SIZE_BYTES, parts[0].part, parts[0].partSize);
+		if (!CryptoWrapper::getDhSharedSecret(_dhContext, _remoteDhPublicKeyBuffer, DH_KEY_SIZE_BYTES, _sharedDhSecretBuffer, DH_KEY_SIZE_BYTES))
+		{
+			printf("verifySigmaMessage #%d failed - Error calculating shared secret\n", messageType);
+			return false;
+		}
     }
 
     // Now we will verify the MAC over the certificate
     // ...
-    
-    return false;
+	// 4. Finally, derive the MAC key and verify the HMAC over the peer's certificate.
+	// This final step proves that the peer actually knows the shared secret, completing the mutual authentication.
+	BYTE macKey[SYMMETRIC_KEY_SIZE_BYTES];
+	BYTE calculatedMac[HMAC_SIZE_BYTES];
+	deriveMacKey(macKey);
+
+	if (!CryptoWrapper::hmac_SHA256(macKey, SYMMETRIC_KEY_SIZE_BYTES, parts[1].part, parts[1].partSize, calculatedMac, HMAC_SIZE_BYTES))
+	{
+		printf("verifySigmaMessage #%d failed - Error calculating HMAC\n", messageType);
+		Utils::secureCleanMemory(macKey, SYMMETRIC_KEY_SIZE_BYTES);
+		return false;
+	}
+	Utils::secureCleanMemory(macKey, SYMMETRIC_KEY_SIZE_BYTES);
+
+	if (memcmp(calculatedMac, parts[3].part, HMAC_SIZE_BYTES) != 0)
+	{
+		printf("verifySigmaMessage #%d failed - HMAC mismatch\n", messageType);
+		return false;
+	}
+
+	return true;
 }
 
 
 ByteSmartPtr Session::prepareEncryptedMessage(unsigned int messageType, const BYTE* message, size_t messageSize)
 {
+    // mine
+    /*
     // we will do a plain copy for now
     size_t encryptedMessageSize = messageSize;
     BYTE* ciphertext = (BYTE*)Utils::allocateBuffer(encryptedMessageSize);
@@ -296,11 +422,43 @@ ByteSmartPtr Session::prepareEncryptedMessage(unsigned int messageType, const BY
 
     ByteSmartPtr result(ciphertext, encryptedMessageSize);
     return result;
+    */
+
+	// 1. Calculate the required size for the ciphertext.
+	// In AES-GCM, the output includes the encrypted payload plus the IV and the authentication tag (MAC).
+	size_t ciphertextSize = CryptoWrapper::getCiphertextSizeAES_GCM256(messageSize);
+	BYTE* ciphertextBuffer = (BYTE*)Utils::allocateBuffer(ciphertextSize);
+	if (ciphertextBuffer == NULL)
+	{
+		return NULL;
+	}
+
+	// 2. Prepare the MessageHeader to be used as Additional Authenticated Data (AAD).
+	// We include the header in the GCM authentication process to ensure the message type,
+	// session ID, and message counter cannot be modified by an attacker.
+	MessageHeader aadHeader;
+	prepareMessageHeader(&aadHeader, messageType, ciphertextSize);
+
+	// 3. Encrypt the plaintext using the established session key.
+	// The CryptoWrapper handles the internal generation of a random IV and appends the MAC tag.
+	size_t actualCiphertextSize = 0;
+	if (!CryptoWrapper::encryptAES_GCM256(_sessionKey, SYMMETRIC_KEY_SIZE_BYTES, message, messageSize, 
+                                          (const BYTE*)&aadHeader, sizeof(MessageHeader), 
+                                          ciphertextBuffer, ciphertextSize, &actualCiphertextSize))
+	{
+		printf("prepareEncryptedMessage failed - AES-GCM encryption error\n");
+		Utils::freeBuffer(ciphertextBuffer);
+		return NULL;
+	}
+
+	return ByteSmartPtr(ciphertextBuffer, actualCiphertextSize);
 }
 
 
 bool Session::decryptMessage(MessageHeader* header, BYTE* buffer, size_t* pPlaintextSize)
 {
+    // mine
+    /*
     // we will do a plain copy for now
     size_t ciphertextSize = header->payloadSize;
     size_t plaintextSize = ciphertextSize;
@@ -312,6 +470,44 @@ bool Session::decryptMessage(MessageHeader* header, BYTE* buffer, size_t* pPlain
     }
 
     return true;
+    */
+
+	// 1. Calculate the expected size of the plaintext.
+	// AES-GCM plaintext is smaller than the ciphertext because the IV and MAC tag are removed.
+	size_t ciphertextSize = header->payloadSize;
+	size_t plaintextSize = CryptoWrapper::getPlaintextSizeAES_GCM256(ciphertextSize);
+	
+	// 2. Allocate a temporary buffer for the decryption process.
+	// We decrypt into a temporary buffer first to ensure we don't overwrite the ciphertext until the authentication (MAC check) is successful.
+	BYTE* plaintextBuffer = (BYTE*)Utils::allocateBuffer(plaintextSize);
+	if (plaintextBuffer == NULL)
+	{
+		return false;
+	}
+
+	// 3. Decrypt and verify the authentication tag using the session key.
+	// The MessageHeader is provided as Additional Authenticated Data (AAD) to verify its integrity.
+	size_t actualPlaintextSize = 0;
+	if (!CryptoWrapper::decryptAES_GCM256(_sessionKey, SYMMETRIC_KEY_SIZE_BYTES, buffer, ciphertextSize, 
+                                          (const BYTE*)header, sizeof(MessageHeader), 
+                                          plaintextBuffer, plaintextSize, &actualPlaintextSize))
+	{
+		printf("decryptMessage failed - AES-GCM decryption/authentication error\n");
+		Utils::freeBuffer(plaintextBuffer);
+		return false;
+	}
+
+	// 4. On successful decryption and authentication, copy the plaintext back to the original message buffer.
+	// We also update the payload size in the header to reflect the decrypted data length.
+	memcpy_s(buffer, ciphertextSize, plaintextBuffer, actualPlaintextSize);
+	header->payloadSize = (unsigned int)actualPlaintextSize;
+	if (pPlaintextSize != NULL)
+	{
+		*pPlaintextSize = actualPlaintextSize;
+	}
+
+	Utils::freeBuffer(plaintextBuffer);
+	return true;
 }
 
 
