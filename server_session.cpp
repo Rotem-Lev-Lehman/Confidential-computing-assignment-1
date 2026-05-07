@@ -110,16 +110,18 @@ Session::ReceiveResult ServerSession::receiveMessage(BYTE* buffer, size_t buffer
             return RR_BAD_MESSAGE;
         }
 
+        // initiate new session, 
+        // incomingCounter - how many messages we expect to receive
+        // outgoingCounter - how many we sent 
         ServerSession* newSession = new ServerSession(*this, _nextSessionId, 1, 0, HELLO_SESSION_MESSAGE);
         memcpy_s(&(newSession->_remoteAddress), sizeof(struct sockaddr_in), &remoteAddr, remoteAddrSize);
 
         // mine
-        // 1. Extract the client's DH public key from the HELLO message payload.
-        // We need this to both calculate the shared secret and to include it in our signature proof.
+        // 1. Extract the client's DH public key from the HELLO message payload. (_remoteDhPublicKeyBuffer)
         memcpy_s(newSession->_remoteDhPublicKeyBuffer, DH_KEY_SIZE_BYTES, buffer + sizeof(MessageHeader), DH_KEY_SIZE_BYTES);
 
         // 2. Initialize the server's side of the Diffie-Hellman exchange.
-        // This generates the server's private secret and its local public key to be sent in Message #2.
+        // initialize y, p, g
         if (!CryptoWrapper::startDh(&(newSession->_dhContext), newSession->_localDhPublicKeyBuffer, DH_KEY_SIZE_BYTES))
         {
             printf("Error starting DH on server\n");
@@ -127,7 +129,7 @@ Session::ReceiveResult ServerSession::receiveMessage(BYTE* buffer, size_t buffer
             return RR_FATAL_ERROR;
         }
 
-        // 3. Compute the shared Diffie-Hellman secret.
+        // 3. Compute the shared Diffie-Hellman secret. (_sharedDhSecretBuffer)
         if (!CryptoWrapper::getDhSharedSecret(newSession->_dhContext, newSession->_remoteDhPublicKeyBuffer, DH_KEY_SIZE_BYTES, newSession->_sharedDhSecretBuffer, DH_KEY_SIZE_BYTES))
         {
             printf("Error calculating shared secret on server\n");
@@ -136,17 +138,13 @@ Session::ReceiveResult ServerSession::receiveMessage(BYTE* buffer, size_t buffer
         }
 
         // here we will prepare DH message 2
-        // ...
-        ///*
         ByteSmartPtr message2 = newSession->prepareSigmaMessage(2);
         if (message2 == NULL)
         {
             delete newSession;
             return RR_FATAL_ERROR;
         }
-		//*/
 
-        // if (!newSession->sendMessageInternal(HELLO_BACK_SESSION_MESSAGE, NULL, 0))
         if (!newSession->sendMessageInternal(HELLO_BACK_SESSION_MESSAGE, message2, message2.size()))
         {
             printf("Error during receive - error sending response to new session\n");
@@ -244,7 +242,6 @@ Session::ReceiveResult ServerSession::receiveMessage(BYTE* buffer, size_t buffer
                 {
                     BYTE* pPayload = buffer + sizeof(MessageHeader);
                     // here we need to verify SIGMA message 3
-					// /*
                     if (!pSession->verifySigmaMessage(3, pPayload, (size_t)header->payloadSize))
                     {
                         printf("Session crypto error, closing session %d\n", pSession->_sessionId);
@@ -253,8 +250,7 @@ Session::ReceiveResult ServerSession::receiveMessage(BYTE* buffer, size_t buffer
                         _activeSessions.erase(header->sessionId);
                         return RR_SESSION_CLOSED;
                     }
-					// */
-
+                    
                     // now we will calculate the session key
                     pSession->deriveSessionKey();
                     pSession->_state = DATA_SESSION_MESSAGE;

@@ -307,7 +307,7 @@ bool CryptoWrapper::signMessageRsa3072Pss(IN const BYTE* message, IN size_t mess
 	}
     mbedtls_rsa_set_padding(rsa, MBEDTLS_RSA_PKCS_V21, MBEDTLS_MD_SHA256);
 
-    // 3. Sign the hash
+    // 3. Sign the hash - we pass our getRandom function for the probalistic pss
     size_t sigLen = 0;
     res = mbedtls_pk_sign(privateKeyContext, MBEDTLS_MD_SHA256, hash, 0, signatureBuffer, &sigLen, getRandom, NULL);
 
